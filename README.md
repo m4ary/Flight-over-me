@@ -12,6 +12,7 @@
   <a href="https://hub.docker.com/r/m4ary/flightoverme"><img src="https://img.shields.io/docker/v/m4ary/flightoverme?label=Docker%20Hub&logo=docker" alt="Docker Hub"/></a>
   <img src="https://img.shields.io/docker/image-size/m4ary/flightoverme/latest?label=Size" alt="Image Size"/>
   <img src="https://img.shields.io/badge/arch-amd64%20%7C%20arm64-blue" alt="Architectures"/>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License"/></a>
 </p>
 
 ---
@@ -68,16 +69,14 @@ The app queries FlightRadar24's public endpoints every `QUERY_DELAY` seconds for
 
 Duplicate notifications are suppressed -- you only get notified once per flight.
 
-## Building & Publishing
+## Contributing
 
-```bash
-# Set your Docker Hub credentials
-cp .env.docker.example .env.docker   # edit with your PAT
-
-# Build and push multi-arch image
-./build.sh
-```
+Found a bug or have an idea? [Open an issue](https://github.com/m4ary/Flight-over-me/issues) or submit a pull request.
 
 ## Note
 
 This uses unofficial FlightRadar24 endpoints -- it may break if they change their API.
+
+## License
+
+[MIT](LICENSE)

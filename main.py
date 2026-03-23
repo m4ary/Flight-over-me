@@ -270,6 +270,11 @@ def main():
     log.info("Starting flight tracker (center=%.4f,%.4f radius=%gkm delay=%ds)",
              LATITUDE, LONGITUDE, RADIUS_KM, QUERY_DELAY)
 
+    send_notification("✅ FlightOverME started\n"
+                      f"📍 Location: {LATITUDE}, {LONGITUDE}\n"
+                      f"📡 Radius: {RADIUS_KM} km\n"
+                      f"⏱ Interval: {QUERY_DELAY}s")
+
     last_flight = None
 
     while True:
