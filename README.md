@@ -17,6 +17,13 @@
 
 ---
 
+## Features
+
+- **Flight notifications** -- get alerted when a plane flies over your area with flight number, airline, route, aircraft type, tail number, and country flags
+- **Runway monitoring** -- get notified when the active runway changes direction, with estimated duration from TAF forecast
+- **Telegram bot** -- send `/wind` to get current wind, active runway, and METAR data on demand
+- **Multi-arch** -- runs on amd64 and arm64 (Raspberry Pi, etc.)
+
 ## Quick Start
 
 ```bash
@@ -37,6 +44,8 @@ docker compose up -d
 
 ## Configuration
 
+### Flight Tracking
+
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `SHOUTRRR_URL` | Notification URL ([supported services](https://containrrr.dev/shoutrrr/services/overview/)) | _(required)_ |
@@ -45,9 +54,53 @@ docker compose up -d
 | `RADIUS_KM` | Search radius in kilometers | `10` |
 | `QUERY_DELAY` | Seconds between flight checks | `30` |
 
+### Runway Monitoring (optional)
+
+| Variable | Description | Example |
+|----------|-------------|---------|
+| `AIRPORT_ICAO` | ICAO code for METAR/TAF data | `OERK` |
+| `AIRPORT_CODE` | IATA code for display | `RUH` |
+| `RUNWAY_HEADINGS` | Comma-separated runway headings | `330,150` |
+
 ## Finding Your Coordinates
 
 Right-click any location on [Google Maps](https://maps.google.com) and copy the latitude/longitude.
+
+## Telegram Bot Commands
+
+When using Telegram as your notification service, the bot listens for commands:
+
+| Command | Description |
+|---------|-------------|
+| `/wind` | Current wind, active runway, estimated duration, and raw METAR |
+
+## Notification Examples
+
+**Flight overhead:**
+```
+✈  SV775 - Saudia
+
+🛫 From:
+Cochin International (COK)
+Kochi, India 🇮🇳
+
+🛬 To:
+Riyadh King Khalid International (RUH)
+Riyadh, Saudi Arabia 🇸🇦
+
+🛩 Aircraft: Airbus A330-343 (A333)
+🔖 Tail: HZ-AQ23
+📅 Age: 8 years
+```
+
+**Runway change:**
+```
+🛣 RUH Runway Changed: 15 → 33
+
+🌬 Wind: NNE 5kt
+🧭 Landing from: SSE
+⏱ Estimated duration: ~6h
+```
 
 ## Shoutrrr URL Examples
 
@@ -59,23 +112,14 @@ Right-click any location on [Google Maps](https://maps.google.com) and copy the 
 | Gotify   | `gotify://hostname/token`                     |
 | Email    | `smtp://user:pass@host:port/?to=recipient`    |
 
-## How It Works
+## Data Sources
 
-The app queries FlightRadar24's public endpoints every `QUERY_DELAY` seconds for flights within your bounding box. When a new flight is detected, it sends a notification with:
-
-- Flight number and airline
-- Route (origin -> destination)
-- Aircraft type
-
-Duplicate notifications are suppressed -- you only get notified once per flight.
+- **FlightRadar24** -- flight tracking (unofficial public endpoints)
+- **aviationweather.gov** -- METAR and TAF data (free, no API key)
 
 ## Contributing
 
 Found a bug or have an idea? [Open an issue](https://github.com/m4ary/Flight-over-me/issues) or submit a pull request.
-
-## Note
-
-This uses unofficial FlightRadar24 endpoints -- it may break if they change their API.
 
 ## License
 
