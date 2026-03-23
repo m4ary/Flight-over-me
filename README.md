@@ -58,9 +58,7 @@ docker compose up -d
 
 | Variable | Description | Example |
 |----------|-------------|---------|
-| `AIRPORT_ICAO` | ICAO code for METAR/TAF data | `OERK` |
-| `AIRPORT_CODE` | IATA code for display | `RUH` |
-| `RUNWAY_HEADINGS` | Comma-separated runway headings | `330,150` |
+| `AIRPORT_CODE` | IATA airport code -- ICAO and runway headings are auto-detected | `RUH` |
 
 ## Finding Your Coordinates
 

@@ -22,11 +22,55 @@ LONGITUDE = float(os.environ.get("LONGITUDE", "46.7484485"))
 RADIUS_KM = float(os.environ.get("RADIUS_KM", "10"))
 QUERY_DELAY = int(os.environ.get("QUERY_DELAY", "30"))
 
-# Airport runway config (for landing direction info)
-AIRPORT_ICAO = os.environ.get("AIRPORT_ICAO", "")  # ICAO code, e.g. OERK for RUH
+# Airport runway monitoring (optional) — just set AIRPORT_CODE, rest is auto-detected
 AIRPORT_CODE = os.environ.get("AIRPORT_CODE", "")   # IATA code, e.g. RUH
-# Comma-separated runway headings, e.g. "330,150" for RUH runways 33/15
-RUNWAY_HEADINGS = os.environ.get("RUNWAY_HEADINGS", "")
+AIRPORT_ICAO = ""
+RUNWAY_HEADINGS = ""
+
+
+def _lookup_airport(iata_code):
+    """Look up ICAO code and runway headings automatically."""
+    global AIRPORT_ICAO, RUNWAY_HEADINGS
+    if not iata_code:
+        return
+    try:
+        # Step 1: Get ICAO code from FR24
+        resp = requests.get(
+            f"https://api.flightradar24.com/common/v1/search.json?query={iata_code}&limit=1",
+            headers=HEADERS,
+            timeout=10,
+        )
+        resp.raise_for_status()
+        airports = resp.json().get("result", {}).get("response", {}).get("airport", {}).get("data", [])
+        if not airports:
+            log.warning("Airport %s not found on FR24", iata_code)
+            return
+        AIRPORT_ICAO = airports[0].get("code", {}).get("icao", "")
+        if not AIRPORT_ICAO:
+            log.warning("No ICAO code found for %s", iata_code)
+            return
+
+        # Step 2: Get runway headings from aviationweather.gov
+        resp = requests.get(
+            f"https://aviationweather.gov/api/data/airport?ids={AIRPORT_ICAO}&format=json",
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if data:
+            runways = data[0].get("runways", [])
+            if runways:
+                headings = set()
+                for rwy in runways:
+                    alignment = rwy.get("alignment", 0)
+                    headings.add(alignment)
+                    headings.add((alignment + 180) % 360)
+                RUNWAY_HEADINGS = ",".join(str(h) for h in sorted(headings))
+
+        log.info("Airport lookup: %s → ICAO=%s, runways=%s",
+                 iata_code, AIRPORT_ICAO, RUNWAY_HEADINGS)
+    except Exception as e:
+        log.error("Airport lookup failed: %s", e)
 
 
 def _bounds_box(lat, lng, radius_km):
@@ -289,8 +333,8 @@ def estimate_runway_duration(current_heading):
 
 def format_runway_change(old_heading, new_heading, metar):
     """Format a runway change notification."""
-    old_name = f"{old_heading // 10:02d}"
-    new_name = f"{new_heading // 10:02d}"
+    old_name = f"{round(old_heading / 10):02d}"
+    new_name = f"{round(new_heading / 10):02d}"
     approach_from = _approach_direction(new_heading)
     wind_dir = _wind_direction_name(metar["direction"])
     wind_kt = metar["speed_kt"]
@@ -363,7 +407,7 @@ def format_wind_status():
     if not runway_heading:
         return "Could not determine active runway."
 
-    runway_name = f"{runway_heading // 10:02d}"
+    runway_name = f"{round(runway_heading / 10):02d}"
     approach_from = _approach_direction(runway_heading)
     wind_dir = _wind_direction_name(metar["direction"])
     wind_kt = metar["speed_kt"]
@@ -474,6 +518,9 @@ def telegram_bot_loop(token):
 
 
 def main():
+    if AIRPORT_CODE:
+        _lookup_airport(AIRPORT_CODE)
+
     if not SHOUTRRR_URL:
         log.warning("SHOUTRRR_URL not configured — notifications will be skipped")
 
@@ -505,7 +552,7 @@ def main():
         if metar:
             active_runway = get_active_runway(metar["direction"])
             if active_runway:
-                rwy_name = f"{active_runway // 10:02d}"
+                rwy_name = f"{round(active_runway / 10):02d}"
                 approach_from = _approach_direction(active_runway)
                 wind_dir = _wind_direction_name(metar["direction"])
                 startup_lines.append("")
