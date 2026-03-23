@@ -1,6 +1,0 @@
-services:
-  flightoverme:
-    image: m4ary/flightoverme:1.1.0
-    container_name: flightoverme
-    env_file: .env
-    restart: unless-stopped
