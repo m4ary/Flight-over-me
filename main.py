@@ -436,7 +436,7 @@ def _send_telegram(token, chat_id, message):
     """Send via Telegram Bot API directly (handles unicode properly)."""
     resp = requests.post(
         f"https://api.telegram.org/bot{token}/sendMessage",
-        json={"chat_id": chat_id, "text": message},
+        json={"chat_id": chat_id, "text": message, "disable_notification": True},
         timeout=15,
     )
     if resp.status_code != 200:
