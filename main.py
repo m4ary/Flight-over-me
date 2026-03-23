@@ -136,7 +136,6 @@ def parse_flight(data):
         aircraft = data.get("aircraft", {}) or {}
         aircraft_code = (aircraft.get("model", {}) or {}).get("code", "") or ""
         aircraft_model = (aircraft.get("model", {}) or {}).get("text", "") or ""
-        aircraft_age = aircraft.get("age", "") or ""
         aircraft_registration = aircraft.get("registration", "") or ""
 
         origin = data.get("airport", {}).get("origin", {}) or {}
@@ -367,9 +366,12 @@ def format_message(flight):
 
     lines = [
         f"✈ {_or_unknown(flight['flight_number'])} - {_or_unknown(flight['airline'])}",
-        f"🛫 {origin_city} ({origin_code}) {origin_flag} → 🛬 {dest_city} ({dest_code}) {dest_flag}",
-        f"🛩 {aircraft} · 🔖 {flight['aircraft_registration']}" if flight["aircraft_registration"] else f"🛩 {aircraft}",
+        f"🛫 {origin_city} ({origin_code}) {origin_flag}",
+        f"🛬 {dest_city} ({dest_code}) {dest_flag}",
+        f"🛩 {aircraft}",
     ]
+    if flight["aircraft_registration"]:
+        lines.append(f"🔖 {flight['aircraft_registration']}")
 
     return "\n".join(lines)
 
