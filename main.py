@@ -2,7 +2,6 @@ import math
 import os
 import re
 import time
-import json
 import subprocess
 import logging
 import threading
@@ -25,19 +24,26 @@ QUERY_DELAY = int(os.environ.get("QUERY_DELAY", "30"))
 # Airport runway monitoring (optional) — just set AIRPORT_CODE, rest is auto-detected
 AIRPORT_CODE = os.environ.get("AIRPORT_CODE", "")   # IATA code, e.g. RUH
 AIRPORT_ICAO = ""
-RUNWAY_HEADINGS = ""
+RUNWAY_HEADINGS_RAW = ""
+RUNWAY_HEADINGS = []  # parsed list of ints
+
+# Reusable HTTP session (keeps TCP connections alive)
+SESSION = requests.Session()
+SESSION.headers.update({
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:106.0) Gecko/20100101 Firefox/106.0",
+    "Accept": "application/json",
+})
 
 
 def _lookup_airport(iata_code):
     """Look up ICAO code and runway headings automatically."""
-    global AIRPORT_ICAO, RUNWAY_HEADINGS
+    global AIRPORT_ICAO, RUNWAY_HEADINGS_RAW, RUNWAY_HEADINGS
     if not iata_code:
         return
     try:
         # Step 1: Get ICAO code from FR24
-        resp = requests.get(
+        resp = SESSION.get(
             f"https://api.flightradar24.com/common/v1/search.json?query={iata_code}&limit=1",
-            headers=HEADERS,
             timeout=10,
         )
         resp.raise_for_status()
@@ -51,7 +57,7 @@ def _lookup_airport(iata_code):
             return
 
         # Step 2: Get runway headings from aviationweather.gov
-        resp = requests.get(
+        resp = SESSION.get(
             f"https://aviationweather.gov/api/data/airport?ids={AIRPORT_ICAO}&format=json",
             timeout=10,
         )
@@ -65,10 +71,11 @@ def _lookup_airport(iata_code):
                     alignment = rwy.get("alignment", 0)
                     headings.add(alignment)
                     headings.add((alignment + 180) % 360)
-                RUNWAY_HEADINGS = ",".join(str(h) for h in sorted(headings))
+                RUNWAY_HEADINGS = sorted(headings)
+                RUNWAY_HEADINGS_RAW = ",".join(str(h) for h in RUNWAY_HEADINGS)
 
         log.info("Airport lookup: %s → ICAO=%s, runways=%s",
-                 iata_code, AIRPORT_ICAO, RUNWAY_HEADINGS)
+                 iata_code, AIRPORT_ICAO, RUNWAY_HEADINGS_RAW)
     except Exception as e:
         log.error("Airport lookup failed: %s", e)
 
@@ -90,16 +97,11 @@ FLIGHT_SEARCH_URL = (
 )
 FLIGHT_DETAILS_URL = "https://data-live.flightradar24.com/clickhandler/?flight="
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:106.0) Gecko/20100101 Firefox/106.0",
-    "Accept": "application/json",
-}
-
 
 def get_flights():
     """Search for flights in the configured bounding box. Returns a flight ID or None."""
     try:
-        resp = requests.get(FLIGHT_SEARCH_URL, headers=HEADERS, timeout=15)
+        resp = SESSION.get(FLIGHT_SEARCH_URL, timeout=15)
         resp.raise_for_status()
         data = resp.json()
     except Exception as e:
@@ -117,7 +119,7 @@ def get_flights():
 def get_flight_details(flight_id):
     """Fetch detailed info for a flight. Returns a dict or None."""
     try:
-        resp = requests.get(FLIGHT_DETAILS_URL + flight_id, headers=HEADERS, timeout=15)
+        resp = SESSION.get(FLIGHT_DETAILS_URL + flight_id, timeout=15)
         resp.raise_for_status()
         return resp.json()
     except Exception as e:
@@ -141,32 +143,23 @@ def parse_flight(data):
         dest = data.get("airport", {}).get("destination", {}) or {}
 
         origin_code = (origin.get("code", {}) or {}).get("iata", "") or ""
-        origin_name = (origin.get("name", "") or "").replace(" Airport", "")
         origin_city = (origin.get("position", {}) or {}).get("region", {}).get("city", "") or ""
-        origin_country = (origin.get("position", {}) or {}).get("country", {}).get("name", "") or ""
         origin_country_code = (origin.get("position", {}) or {}).get("country", {}).get("code", "") or ""
         dest_code = (dest.get("code", {}) or {}).get("iata", "") or ""
-        dest_name = (dest.get("name", "") or "").replace(" Airport", "")
         dest_city = (dest.get("position", {}) or {}).get("region", {}).get("city", "") or ""
-        dest_country = (dest.get("position", {}) or {}).get("country", {}).get("name", "") or ""
         dest_country_code = (dest.get("position", {}) or {}).get("country", {}).get("code", "") or ""
 
         return {
             "flight_number": flight_number or callsign,
             "airline": airline,
             "origin_code": origin_code,
-            "origin_name": origin_name,
             "origin_city": origin_city,
-            "origin_country": origin_country,
             "origin_country_code": origin_country_code,
             "dest_code": dest_code,
-            "dest_name": dest_name,
             "dest_city": dest_city,
-            "dest_country": dest_country,
             "dest_country_code": dest_country_code,
             "aircraft_code": aircraft_code,
             "aircraft_model": aircraft_model,
-            "aircraft_age": aircraft_age,
             "aircraft_registration": aircraft_registration,
         }
     except (KeyError, TypeError) as e:
@@ -250,7 +243,7 @@ def get_metar():
     if not AIRPORT_ICAO:
         return None
     try:
-        resp = requests.get(
+        resp = SESSION.get(
             f"https://aviationweather.gov/api/data/metar?ids={AIRPORT_ICAO}&format=json",
             timeout=10,
         )
@@ -275,12 +268,9 @@ def get_active_runway(wind_direction):
     so the active runway heading should be closest to the wind direction."""
     if not RUNWAY_HEADINGS:
         return None
-    headings = [int(h.strip()) for h in RUNWAY_HEADINGS.split(",")]
-    # Pick the runway whose heading is closest to where the wind is coming FROM
-    # (planes land into the wind = runway heading matches wind direction)
     best = None
     best_diff = 360
-    for h in headings:
+    for h in RUNWAY_HEADINGS:
         # Angular difference between runway heading and wind direction
         diff = abs(((wind_direction - h) + 180) % 360 - 180)
         if diff < best_diff:
@@ -294,7 +284,7 @@ def get_taf():
     if not AIRPORT_ICAO:
         return None
     try:
-        resp = requests.get(
+        resp = SESSION.get(
             f"https://aviationweather.gov/api/data/taf?ids={AIRPORT_ICAO}&format=json",
             timeout=10,
         )
@@ -369,13 +359,8 @@ def format_message(flight):
     if flight["aircraft_model"]:
         aircraft = f"{flight['aircraft_model']} ({flight['aircraft_code']})"
 
-    origin_name = _or_unknown(flight["origin_name"])
     origin_code = flight["origin_code"] or "???"
-    origin_loc = ", ".join(filter(None, [flight["origin_city"], flight["origin_country"]]))
-
-    dest_name = _or_unknown(flight["dest_name"])
     dest_code = flight["dest_code"] or "???"
-    dest_loc = ", ".join(filter(None, [flight["dest_city"], flight["dest_country"]]))
 
     origin_city = _or_unknown(flight["origin_city"])
     dest_city = _or_unknown(flight["dest_city"])
@@ -434,7 +419,7 @@ def _parse_shoutrrr_url(url):
 
 def _send_telegram(token, chat_id, message):
     """Send via Telegram Bot API directly (handles unicode properly)."""
-    resp = requests.post(
+    resp = SESSION.post(
         f"https://api.telegram.org/bot{token}/sendMessage",
         json={"chat_id": chat_id, "text": message, "disable_notification": True},
         timeout=15,
@@ -464,15 +449,17 @@ def _send_shoutrrr(url, message):
         log.error("Notification error: %s", e)
 
 
+_NOTIFY_SERVICE, _NOTIFY_PARAMS = _parse_shoutrrr_url(SHOUTRRR_URL)
+
+
 def send_notification(message):
     """Send a notification. Uses Telegram API directly if URL is telegram://, otherwise shoutrrr."""
     if not SHOUTRRR_URL:
         log.warning("SHOUTRRR_URL not set, skipping notification")
         return
 
-    service, params = _parse_shoutrrr_url(SHOUTRRR_URL)
-    if service == "telegram":
-        _send_telegram(params["token"], params["chat_id"], message)
+    if _NOTIFY_SERVICE == "telegram":
+        _send_telegram(_NOTIFY_PARAMS["token"], _NOTIFY_PARAMS["chat_id"], message)
     else:
         _send_shoutrrr(SHOUTRRR_URL, message)
 
@@ -485,7 +472,7 @@ def telegram_bot_loop(token):
             params = {"timeout": 30, "allowed_updates": ["message"]}
             if offset:
                 params["offset"] = offset
-            resp = requests.get(
+            resp = SESSION.get(
                 f"https://api.telegram.org/bot{token}/getUpdates",
                 params=params,
                 timeout=35,
@@ -521,11 +508,10 @@ def main():
              LATITUDE, LONGITUDE, RADIUS_KM, QUERY_DELAY)
 
     # Start Telegram bot listener for /wind command
-    service, params = _parse_shoutrrr_url(SHOUTRRR_URL)
-    if service == "telegram":
+    if _NOTIFY_SERVICE == "telegram":
         bot_thread = threading.Thread(
             target=telegram_bot_loop,
-            args=(params["token"],),
+            args=(_NOTIFY_PARAMS["token"],),
             daemon=True,
         )
         bot_thread.start()
