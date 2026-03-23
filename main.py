@@ -377,20 +377,13 @@ def format_message(flight):
     dest_code = flight["dest_code"] or "???"
     dest_loc = ", ".join(filter(None, [flight["dest_city"], flight["dest_country"]]))
 
+    origin_city = _or_unknown(flight["origin_city"])
+    dest_city = _or_unknown(flight["dest_city"])
+
     lines = [
-        f"✈  {_or_unknown(flight['flight_number'])} - {_or_unknown(flight['airline'])}",
-        "",
-        f"🛫 From:",
-        f"{origin_name} ({origin_code})",
-        f"{_or_unknown(origin_loc)} {origin_flag}".strip(),
-        "",
-        f"🛬 To:",
-        f"{dest_name} ({dest_code})",
-        f"{_or_unknown(dest_loc)} {dest_flag}".strip(),
-        "",
-        f"🛩 Aircraft: {aircraft}",
-        f"🔖 Tail: {flight['aircraft_registration']}" if flight["aircraft_registration"] else "",
-        f"📅 Age: {flight['aircraft_age']} years" if flight["aircraft_age"] else "",
+        f"✈ {_or_unknown(flight['flight_number'])} - {_or_unknown(flight['airline'])}",
+        f"🛫 {origin_city} ({origin_code}) {origin_flag} → 🛬 {dest_city} ({dest_code}) {dest_flag}",
+        f"🛩 {aircraft} · 🔖 {flight['aircraft_registration']}" if flight["aircraft_registration"] else f"🛩 {aircraft}",
     ]
 
     return "\n".join(lines)
