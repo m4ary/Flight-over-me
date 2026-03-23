@@ -1,0 +1,6 @@
+services:
+  flightoverme:
+    image: m4ary/flightoverme:latest
+    build: .
+    env_file: .env
+    restart: unless-stopped
