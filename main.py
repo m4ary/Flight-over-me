@@ -1,9 +1,11 @@
+import math
 import os
 import re
 import time
 import json
 import subprocess
 import logging
+import threading
 
 import requests
 
@@ -20,13 +22,16 @@ LONGITUDE = float(os.environ.get("LONGITUDE", "46.7484485"))
 RADIUS_KM = float(os.environ.get("RADIUS_KM", "10"))
 QUERY_DELAY = int(os.environ.get("QUERY_DELAY", "30"))
 
+# Airport runway config (for landing direction info)
+AIRPORT_ICAO = os.environ.get("AIRPORT_ICAO", "")  # ICAO code, e.g. OERK for RUH
+AIRPORT_CODE = os.environ.get("AIRPORT_CODE", "")   # IATA code, e.g. RUH
+# Comma-separated runway headings, e.g. "330,150" for RUH runways 33/15
+RUNWAY_HEADINGS = os.environ.get("RUNWAY_HEADINGS", "")
+
 
 def _bounds_box(lat, lng, radius_km):
     """Convert center point + radius to FR24 bounding box string."""
-    # 1 degree latitude ~ 111 km
     lat_offset = radius_km / 111.0
-    # 1 degree longitude ~ 111 km * cos(latitude)
-    import math
     lng_offset = radius_km / (111.0 * math.cos(math.radians(lat)))
     return f"{lat + lat_offset},{lat - lat_offset},{lng - lng_offset},{lng + lng_offset}"
 
@@ -182,31 +187,203 @@ def _country_flag(country_code):
     return "".join(chr(0x1F1E6 + ord(c) - ord("A")) for c in code)
 
 
+def _wind_direction_name(degrees):
+    """Convert wind degrees to compass direction."""
+    dirs = ["N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE",
+            "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"]
+    idx = round(degrees / 22.5) % 16
+    return dirs[idx]
+
+
+def _approach_direction(runway_heading):
+    """Planes approach from the opposite direction of the runway heading."""
+    approach = (runway_heading + 180) % 360
+    return _wind_direction_name(approach)
+
+
+def get_metar():
+    """Fetch current METAR from aviationweather.gov (free, no key)."""
+    if not AIRPORT_ICAO:
+        return None
+    try:
+        resp = requests.get(
+            f"https://aviationweather.gov/api/data/metar?ids={AIRPORT_ICAO}&format=json",
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if not data:
+            return None
+        metar = data[0]
+        return {
+            "direction": metar.get("wdir", 0) or 0,
+            "speed_kt": metar.get("wspd", 0) or 0,
+            "gust_kt": metar.get("wgst", 0) or 0,
+            "raw": metar.get("rawOb", ""),
+        }
+    except Exception as e:
+        log.error("METAR fetch failed: %s", e)
+        return None
+
+
+def get_active_runway(wind_direction):
+    """Determine active runway based on wind direction. Planes land into the wind,
+    so the active runway heading should be closest to the wind direction."""
+    if not RUNWAY_HEADINGS:
+        return None
+    headings = [int(h.strip()) for h in RUNWAY_HEADINGS.split(",")]
+    # Pick the runway whose heading is closest to where the wind is coming FROM
+    # (planes land into the wind = runway heading matches wind direction)
+    best = None
+    best_diff = 360
+    for h in headings:
+        # Angular difference between runway heading and wind direction
+        diff = abs(((wind_direction - h) + 180) % 360 - 180)
+        if diff < best_diff:
+            best_diff = diff
+            best = h
+    return best
+
+
+def get_taf():
+    """Fetch TAF forecast from aviationweather.gov (free, no key)."""
+    if not AIRPORT_ICAO:
+        return None
+    try:
+        resp = requests.get(
+            f"https://aviationweather.gov/api/data/taf?ids={AIRPORT_ICAO}&format=json",
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if not data:
+            return None
+        return data[0].get("fcsts", [])
+    except Exception as e:
+        log.error("TAF fetch failed: %s", e)
+        return None
+
+
+def estimate_runway_duration(current_heading):
+    """Estimate how long the current runway stays active based on TAF forecast."""
+    fcsts = get_taf()
+    if not fcsts:
+        return None
+    now = int(time.time())
+    for fcst in fcsts:
+        wdir = fcst.get("wdir")
+        if wdir is None:
+            continue
+        time_from = fcst.get("timeFrom", 0)
+        time_bec = fcst.get("timeBec")
+        # Only look at future forecast periods
+        change_time = time_bec or time_from
+        if change_time <= now:
+            continue
+        predicted_runway = get_active_runway(wdir)
+        if predicted_runway and predicted_runway != current_heading:
+            hours = max(1, round((change_time - now) / 3600))
+            return hours
+    return None
+
+
+def format_runway_change(old_heading, new_heading, metar):
+    """Format a runway change notification."""
+    old_name = f"{old_heading // 10:02d}"
+    new_name = f"{new_heading // 10:02d}"
+    approach_from = _approach_direction(new_heading)
+    wind_dir = _wind_direction_name(metar["direction"])
+    wind_kt = metar["speed_kt"]
+    gust_kt = metar["gust_kt"]
+
+    duration = estimate_runway_duration(new_heading)
+    if duration:
+        duration_str = f"~{duration}h" if duration > 1 else "~1h"
+    else:
+        duration_str = "24h+"
+
+    lines = [
+        f"🛣 {AIRPORT_CODE} Runway Changed: {old_name} → {new_name}",
+        "",
+        f"🌬 Wind: {wind_dir} {wind_kt}kt" + (f" (gusts {gust_kt}kt)" if gust_kt else ""),
+        f"🧭 Landing from: {approach_from}",
+        f"⏱ Estimated duration: {duration_str}",
+    ]
+    return "\n".join(lines)
+
+
+def _or_unknown(value):
+    return value if value else "Unknown"
+
+
 def format_message(flight):
     """Format a notification message from flight info."""
     origin_flag = _country_flag(flight["origin_country_code"])
     dest_flag = _country_flag(flight["dest_country_code"])
 
-    aircraft = flight["aircraft_code"]
+    aircraft = _or_unknown(flight["aircraft_code"])
     if flight["aircraft_model"]:
-        aircraft = f"{flight['aircraft_model']} ({aircraft})"
+        aircraft = f"{flight['aircraft_model']} ({flight['aircraft_code']})"
+
+    origin_name = _or_unknown(flight["origin_name"])
+    origin_code = flight["origin_code"] or "???"
+    origin_loc = ", ".join(filter(None, [flight["origin_city"], flight["origin_country"]]))
+
+    dest_name = _or_unknown(flight["dest_name"])
+    dest_code = flight["dest_code"] or "???"
+    dest_loc = ", ".join(filter(None, [flight["dest_city"], flight["dest_country"]]))
 
     lines = [
-        f"✈  {flight['flight_number']} - {flight['airline']}",
+        f"✈  {_or_unknown(flight['flight_number'])} - {_or_unknown(flight['airline'])}",
         "",
         f"🛫 From:",
-        f"{flight['origin_name']} ({flight['origin_code']})",
-        f"{flight['origin_city']}, {flight['origin_country']} {origin_flag}",
+        f"{origin_name} ({origin_code})",
+        f"{_or_unknown(origin_loc)} {origin_flag}".strip(),
         "",
         f"🛬 To:",
-        f"{flight['dest_name']} ({flight['dest_code']})",
-        f"{flight['dest_city']}, {flight['dest_country']} {dest_flag}",
+        f"{dest_name} ({dest_code})",
+        f"{_or_unknown(dest_loc)} {dest_flag}".strip(),
         "",
         f"🛩 Aircraft: {aircraft}",
         f"🔖 Tail: {flight['aircraft_registration']}" if flight["aircraft_registration"] else "",
         f"📅 Age: {flight['aircraft_age']} years" if flight["aircraft_age"] else "",
     ]
 
+    return "\n".join(lines)
+
+
+def format_wind_status():
+    """Format current wind/runway status for /wind command."""
+    if not AIRPORT_ICAO or not RUNWAY_HEADINGS:
+        return "Airport not configured."
+    metar = get_metar()
+    if not metar:
+        return "Could not fetch METAR data."
+    runway_heading = get_active_runway(metar["direction"])
+    if not runway_heading:
+        return "Could not determine active runway."
+
+    runway_name = f"{runway_heading // 10:02d}"
+    approach_from = _approach_direction(runway_heading)
+    wind_dir = _wind_direction_name(metar["direction"])
+    wind_kt = metar["speed_kt"]
+    gust_kt = metar["gust_kt"]
+
+    duration = estimate_runway_duration(runway_heading)
+    if duration:
+        duration_str = f"~{duration}h" if duration > 1 else "~1h"
+    else:
+        duration_str = "24h+"
+
+    lines = [
+        f"🛣 {AIRPORT_CODE} Active Runway: {runway_name}",
+        "",
+        f"🌬 Wind: {wind_dir} {wind_kt}kt" + (f" (gusts {gust_kt}kt)" if gust_kt else ""),
+        f"🧭 Landing from: {approach_from}",
+        f"⏱ Estimated duration: {duration_str}",
+        "",
+        f"📡 METAR: {metar['raw']}",
+    ]
     return "\n".join(lines)
 
 
@@ -263,6 +440,39 @@ def send_notification(message):
         _send_shoutrrr(SHOUTRRR_URL, message)
 
 
+def telegram_bot_loop(token):
+    """Poll Telegram for /wind commands and reply."""
+    offset = None
+    while True:
+        try:
+            params = {"timeout": 30, "allowed_updates": ["message"]}
+            if offset:
+                params["offset"] = offset
+            resp = requests.get(
+                f"https://api.telegram.org/bot{token}/getUpdates",
+                params=params,
+                timeout=35,
+            )
+            if resp.status_code != 200:
+                log.error("Telegram getUpdates error: %s", resp.status_code)
+                time.sleep(5)
+                continue
+            updates = resp.json().get("result", [])
+            for update in updates:
+                offset = update["update_id"] + 1
+                msg = update.get("message", {})
+                text = msg.get("text", "")
+                chat_id = msg.get("chat", {}).get("id")
+                if not chat_id:
+                    continue
+                if text.strip() == "/wind":
+                    reply = format_wind_status()
+                    _send_telegram(token, str(chat_id), reply)
+        except Exception as e:
+            log.error("Telegram bot error: %s", e)
+            time.sleep(5)
+
+
 def main():
     if not SHOUTRRR_URL:
         log.warning("SHOUTRRR_URL not configured — notifications will be skipped")
@@ -270,12 +480,48 @@ def main():
     log.info("Starting flight tracker (center=%.4f,%.4f radius=%gkm delay=%ds)",
              LATITUDE, LONGITUDE, RADIUS_KM, QUERY_DELAY)
 
-    send_notification("✅ FlightOverME started\n"
-                      f"📍 Location: {LATITUDE}, {LONGITUDE}\n"
-                      f"📡 Radius: {RADIUS_KM} km\n"
-                      f"⏱ Interval: {QUERY_DELAY}s")
+    # Start Telegram bot listener for /wind command
+    service, params = _parse_shoutrrr_url(SHOUTRRR_URL)
+    if service == "telegram":
+        bot_thread = threading.Thread(
+            target=telegram_bot_loop,
+            args=(params["token"],),
+            daemon=True,
+        )
+        bot_thread.start()
+        log.info("Telegram bot started (listening for /wind)")
+
+    # Build startup message with runway info
+    startup_lines = [
+        "✅ FlightOverME started",
+        f"📍 Location: {LATITUDE}, {LONGITUDE}",
+        f"📡 Radius: {RADIUS_KM} km",
+        f"⏱ Interval: {QUERY_DELAY}s",
+    ]
+
+    active_runway = None
+    if AIRPORT_ICAO and RUNWAY_HEADINGS:
+        metar = get_metar()
+        if metar:
+            active_runway = get_active_runway(metar["direction"])
+            if active_runway:
+                rwy_name = f"{active_runway // 10:02d}"
+                approach_from = _approach_direction(active_runway)
+                wind_dir = _wind_direction_name(metar["direction"])
+                startup_lines.append("")
+                duration = estimate_runway_duration(active_runway)
+                duration_str = f"~{duration}h" if duration and duration > 1 else "~1h" if duration else "24h+"
+                startup_lines.append(f"🛣 {AIRPORT_CODE} Runway: {rwy_name}")
+                startup_lines.append(f"🌬 Wind: {wind_dir} {metar['speed_kt']}kt")
+                startup_lines.append(f"🧭 Landing from: {approach_from}")
+                startup_lines.append(f"⏱ Estimated duration: {duration_str}")
+                log.info("Initial active runway: %s (%s)", rwy_name, AIRPORT_CODE)
+
+    send_notification("\n".join(startup_lines))
 
     last_flight = None
+
+    loop_count = 0
 
     while True:
         flight_id = get_flights()
@@ -298,6 +544,20 @@ def main():
             log.debug("Same flight %s still overhead", flight_id)
         else:
             last_flight = None
+
+        # Check for runway change every ~5 minutes (10 loops at 30s)
+        loop_count += 1
+        if AIRPORT_ICAO and RUNWAY_HEADINGS and loop_count % 10 == 0:
+            metar = get_metar()
+            if metar:
+                new_runway = get_active_runway(metar["direction"])
+                if new_runway and active_runway and new_runway != active_runway:
+                    msg = format_runway_change(active_runway, new_runway, metar)
+                    log.info("Runway change detected:\n%s", msg)
+                    send_notification(msg)
+                    active_runway = new_runway
+                elif new_runway:
+                    active_runway = new_runway
 
         time.sleep(QUERY_DELAY)
 
