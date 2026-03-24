@@ -470,6 +470,7 @@ def format_help():
     return "\n".join([
         "📖 FlightOverME Commands",
         "",
+        "/track SV1164 — Check flight status & delays",
         "/runway — Active runway & wind info",
         "/status — Tracker uptime & flight count",
         "/last — Last flight seen",
@@ -505,6 +506,90 @@ def format_last_flight():
     if not _last_flight_msg:
         return "No flights seen yet."
     return f"📋 Last Flight\n\n{_last_flight_msg}"
+
+
+def _search_flight(flight_number):
+    """Search FR24 for a flight by number and return its live tracking ID."""
+    try:
+        resp = SESSION.get(
+            f"https://api.flightradar24.com/common/v1/search.json?query={flight_number}&limit=1",
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        live = data.get("result", {}).get("response", {}).get("flight", {}).get("data", [])
+        if live:
+            return live[0].get("id")
+    except Exception as e:
+        log.error("Flight search failed: %s", e)
+    return None
+
+
+def format_track(flight_number):
+    """Track a flight: find it on FR24, get details, show status."""
+    flight_number = flight_number.upper().strip()
+    if not flight_number:
+        return "Usage: /track SV1164"
+
+    flight_id = _search_flight(flight_number)
+    if not flight_id:
+        return f"Flight {flight_number} not found on FlightRadar24."
+
+    details = get_flight_details(flight_id)
+    if not details:
+        return f"Could not fetch details for {flight_number}."
+
+    try:
+        ident = details.get("identification", {})
+        airline_name = (details.get("airline", {}) or {}).get("name", "") or ""
+        aircraft = details.get("aircraft", {}) or {}
+        reg = aircraft.get("registration", "") or ""
+        model_text = (aircraft.get("model", {}) or {}).get("text", "") or ""
+
+        origin = (details.get("airport", {}) or {}).get("origin", {}) or {}
+        dest = (details.get("airport", {}) or {}).get("destination", {}) or {}
+        origin_code = (origin.get("code", {}) or {}).get("iata", "") or "???"
+        origin_city = (origin.get("position", {}) or {}).get("region", {}).get("city", "") or ""
+        dest_code = (dest.get("code", {}) or {}).get("iata", "") or "???"
+        dest_city = (dest.get("position", {}) or {}).get("region", {}).get("city", "") or ""
+
+        status = (details.get("status", {}) or {}).get("text", "") or "Unknown"
+
+        # Time info
+        time_info = details.get("time", {}) or {}
+        scheduled_dep = (time_info.get("scheduled", {}) or {}).get("departure")
+        actual_dep = (time_info.get("real", {}) or {}).get("departure")
+        estimated_arr = (time_info.get("estimated", {}) or {}).get("arrival")
+
+        lines = [
+            f"🔍 {flight_number} - {airline_name}" if airline_name else f"🔍 {flight_number}",
+            f"🛫 {origin_city} ({origin_code}) → 🛬 {dest_city} ({dest_code})",
+            f"📍 Status: {status}",
+        ]
+
+        if model_text:
+            lines.append(f"🛩 {model_text}" + (f" · 🔖 {reg}" if reg else ""))
+
+        # Show delay info
+        if scheduled_dep and actual_dep:
+            delay_min = (actual_dep - scheduled_dep) // 60
+            if delay_min > 5:
+                lines.append(f"⚠ Departed {delay_min}min late")
+            elif delay_min < -5:
+                lines.append(f"✅ Departed {abs(delay_min)}min early")
+            else:
+                lines.append("✅ Departed on time")
+
+        if estimated_arr:
+            eta = time.strftime("%H:%M", time.localtime(estimated_arr))
+            lines.append(f"🕐 ETA: {eta}")
+
+        lines.append(f"🔗 flightradar24.com/{flight_number}")
+        return "\n".join(lines)
+
+    except Exception as e:
+        log.error("Failed to format track info: %s", e)
+        return f"Error getting details for {flight_number}."
 
 
 def send_notification(message):
@@ -554,6 +639,13 @@ def telegram_bot_loop(token):
                     continue
                 if BOT_ADMIN_ID and user_id != BOT_ADMIN_ID:
                     continue
+                # Handle /track with argument
+                if text.startswith("/track"):
+                    parts = text.split(None, 1)
+                    arg = parts[1] if len(parts) > 1 else ""
+                    reply = format_track(arg)
+                    _send_telegram(token, str(chat_id), reply)
+                    continue
                 handler = commands.get(text)
                 if handler:
                     reply = handler()
@@ -586,33 +678,15 @@ def main():
         bot_thread.start()
         log.info("Telegram bot started (listening for commands)")
 
-    # Build startup message with runway info
-    startup_lines = [
-        "✅ FlightOverME started",
-        f"📍 Location: {LATITUDE}, {LONGITUDE}",
-        f"📡 Radius: {RADIUS_KM} km",
-        f"⏱ Interval: {QUERY_DELAY}s",
-    ]
-
+    # Initialize active runway for change detection
     active_runway = None
     if AIRPORT_ICAO and RUNWAY_HEADINGS:
         metar = get_metar()
         if metar:
             active_runway = get_active_runway(metar["direction"])
             if active_runway:
-                rwy_name = f"{round(active_runway / 10):02d}"
-                approach_from = _approach_direction(active_runway)
-                wind_dir = _wind_direction_name(metar["direction"])
-                startup_lines.append("")
-                duration = estimate_runway_duration(active_runway)
-                duration_str = f"~{duration}h" if duration and duration > 1 else "~1h" if duration else "24h+"
-                startup_lines.append(f"🛣 {AIRPORT_CODE} Runway: {rwy_name}")
-                startup_lines.append(f"🌬 Wind: {wind_dir} {metar['speed_kt']}kt")
-                startup_lines.append(f"🧭 Landing from: {approach_from}")
-                startup_lines.append(f"⏱ Estimated duration: {duration_str}")
-                log.info("Initial active runway: %s (%s)", rwy_name, AIRPORT_CODE)
-
-    send_notification("\n".join(startup_lines))
+                log.info("Initial active runway: %s (%s)",
+                         f"{round(active_runway / 10):02d}", AIRPORT_CODE)
 
     last_flight = None
 
