@@ -20,6 +20,8 @@ LATITUDE = float(os.environ.get("LATITUDE", "24.8539174"))
 LONGITUDE = float(os.environ.get("LONGITUDE", "46.7484485"))
 RADIUS_KM = float(os.environ.get("RADIUS_KM", "10"))
 QUERY_DELAY = int(os.environ.get("QUERY_DELAY", "30"))
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "")  # Telegram bot token for commands (falls back to SHOUTRRR_URL token)
+BOT_ADMIN_ID = os.environ.get("BOT_ADMIN_ID", "")  # Telegram user ID to restrict bot commands
 
 # Airport runway monitoring (optional) — just set AIRPORT_CODE, rest is auto-detected
 AIRPORT_CODE = os.environ.get("AIRPORT_CODE", "")   # IATA code, e.g. RUH
@@ -365,14 +367,17 @@ def format_message(flight):
     origin_city = _or_unknown(flight["origin_city"])
     dest_city = _or_unknown(flight["dest_city"])
 
+    flight_num = _or_unknown(flight['flight_number'])
     lines = [
-        f"✈ {_or_unknown(flight['flight_number'])} - {_or_unknown(flight['airline'])}",
+        f"✈ {flight_num} - {_or_unknown(flight['airline'])}",
         f"🛫 {origin_city} ({origin_code}) {origin_flag}",
         f"🛬 {dest_city} ({dest_code}) {dest_flag}",
         f"🛩 {aircraft}",
     ]
     if flight["aircraft_registration"]:
         lines.append(f"🔖 {flight['aircraft_registration']}")
+    if flight_num != "Unknown":
+        lines.append(f"🔗 flightradar24.com/{flight_num}")
 
     return "\n".join(lines)
 
@@ -544,7 +549,10 @@ def telegram_bot_loop(token):
                 msg = update.get("message", {})
                 text = (msg.get("text", "") or "").strip().split("@")[0]  # strip @botname
                 chat_id = msg.get("chat", {}).get("id")
+                user_id = str(msg.get("from", {}).get("id", ""))
                 if not chat_id:
+                    continue
+                if BOT_ADMIN_ID and user_id != BOT_ADMIN_ID:
                     continue
                 handler = commands.get(text)
                 if handler:
@@ -569,10 +577,11 @@ def main():
              LATITUDE, LONGITUDE, RADIUS_KM, QUERY_DELAY)
 
     # Start Telegram bot listener for commands
-    if _NOTIFY_SERVICE == "telegram":
+    bot_token = BOT_TOKEN or (_NOTIFY_PARAMS.get("token") if _NOTIFY_SERVICE == "telegram" else "")
+    if bot_token:
         bot_thread = threading.Thread(
             target=telegram_bot_loop,
-            args=(_NOTIFY_PARAMS["token"],),
+            args=(bot_token,),
             daemon=True,
         )
         bot_thread.start()

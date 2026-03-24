@@ -21,7 +21,8 @@
 
 - **Flight notifications** -- get alerted when a plane flies over your area with flight number, airline, route, aircraft type, tail number, and country flags
 - **Runway monitoring** -- get notified when the active runway changes direction, with estimated duration from TAF forecast
-- **Telegram bot** -- send `/wind` to get current wind, active runway, and METAR data on demand
+- **FR24 links** -- each notification includes a direct FlightRadar24 link
+- **Telegram bot** -- send `/runway`, `/status`, `/last`, `/help` commands on demand
 - **Multi-arch** -- runs on amd64 and arm64 (Raspberry Pi, etc.)
 
 ## Quick Start
@@ -59,6 +60,8 @@ docker compose up -d
 | Variable | Description | Example |
 |----------|-------------|---------|
 | `AIRPORT_CODE` | IATA airport code -- ICAO and runway headings are auto-detected | `RUH` |
+| `BOT_TOKEN` | Telegram bot token for commands (falls back to `SHOUTRRR_URL` token) | |
+| `BOT_ADMIN_ID` | Telegram user ID to restrict bot commands | |
 
 ## Finding Your Coordinates
 
@@ -70,25 +73,21 @@ When using Telegram as your notification service, the bot listens for commands:
 
 | Command | Description |
 |---------|-------------|
-| `/wind` | Current wind, active runway, estimated duration, and raw METAR |
+| `/runway` | Current wind, active runway, estimated duration, and raw METAR |
+| `/status` | Tracker uptime and flight count |
+| `/last` | Last flight seen |
+| `/help` | List available commands |
 
 ## Notification Examples
 
 **Flight overhead:**
 ```
-✈  SV775 - Saudia
-
-🛫 From:
-Cochin International (COK)
-Kochi, India 🇮🇳
-
-🛬 To:
-Riyadh King Khalid International (RUH)
-Riyadh, Saudi Arabia 🇸🇦
-
-🛩 Aircraft: Airbus A330-343 (A333)
-🔖 Tail: HZ-AQ23
-📅 Age: 8 years
+✈ SV775 - Saudia
+🛫 Kochi (COK) 🇮🇳
+🛬 Riyadh (RUH) 🇸🇦
+🛩 Airbus A330-343 (A333)
+🔖 HZ-AQ23
+🔗 flightradar24.com/SV775
 ```
 
 **Runway change:**
