@@ -557,8 +557,7 @@ def telegram_bot_loop(token):
                 handler = commands.get(text)
                 if handler:
                     reply = handler()
-                    channel_id = _NOTIFY_PARAMS.get("chat_id", str(chat_id))
-                    _send_telegram(token, channel_id, reply)
+                    _send_telegram(token, str(chat_id), reply)
         except Exception as e:
             log.error("Telegram bot error: %s", e)
             time.sleep(5)
