@@ -252,9 +252,9 @@ def get_metar():
             return None
         metar = data[0]
         return {
-            "direction": metar.get("wdir", 0) or 0,
-            "speed_kt": metar.get("wspd", 0) or 0,
-            "gust_kt": metar.get("wgst", 0) or 0,
+            "direction": int(metar.get("wdir", 0) or 0),
+            "speed_kt": int(metar.get("wspd", 0) or 0),
+            "gust_kt": int(metar.get("wgst", 0) or 0),
             "raw": metar.get("rawOb", ""),
         }
     except Exception as e:
@@ -305,8 +305,9 @@ def estimate_runway_duration(current_heading):
     now = int(time.time())
     for fcst in fcsts:
         wdir = fcst.get("wdir")
-        if wdir is None:
+        if wdir is None or wdir == "VRB":
             continue
+        wdir = int(wdir)
         time_from = fcst.get("timeFrom", 0)
         time_bec = fcst.get("timeBec")
         # Only look at future forecast periods
@@ -453,6 +454,53 @@ def _send_shoutrrr(url, message):
 
 _NOTIFY_SERVICE, _NOTIFY_PARAMS = _parse_shoutrrr_url(SHOUTRRR_URL)
 
+# Tracking state for bot commands
+_start_time = time.time()
+_flights_seen = 0
+_last_flight_msg = None
+
+
+def format_help():
+    """Format /help response."""
+    return "\n".join([
+        "📖 FlightOverME Commands",
+        "",
+        "/runway — Active runway & wind info",
+        "/status — Tracker uptime & flight count",
+        "/last — Last flight seen",
+        "/help — Show this message",
+    ])
+
+
+def format_status():
+    """Format /status response."""
+    uptime_s = int(time.time() - _start_time)
+    hours, remainder = divmod(uptime_s, 3600)
+    minutes, _ = divmod(remainder, 60)
+    if hours > 0:
+        uptime_str = f"{hours}h {minutes}m"
+    else:
+        uptime_str = f"{minutes}m"
+
+    lines = [
+        "📊 FlightOverME Status",
+        "",
+        f"⏱ Uptime: {uptime_str}",
+        f"✈ Flights seen: {_flights_seen}",
+        f"📍 Location: {LATITUDE}, {LONGITUDE}",
+        f"📡 Radius: {RADIUS_KM} km",
+    ]
+    if AIRPORT_CODE:
+        lines.append(f"🛣 Airport: {AIRPORT_CODE} ({AIRPORT_ICAO})")
+    return "\n".join(lines)
+
+
+def format_last_flight():
+    """Format /last response."""
+    if not _last_flight_msg:
+        return "No flights seen yet."
+    return f"📋 Last Flight\n\n{_last_flight_msg}"
+
 
 def send_notification(message):
     """Send a notification. Uses Telegram API directly if URL is telegram://, otherwise shoutrrr."""
@@ -467,7 +515,14 @@ def send_notification(message):
 
 
 def telegram_bot_loop(token):
-    """Poll Telegram for /wind commands and reply."""
+    """Poll Telegram for bot commands and reply."""
+    commands = {
+        "/runway": format_wind_status,
+        "/wind": format_wind_status,  # backward compat
+        "/status": format_status,
+        "/last": format_last_flight,
+        "/help": format_help,
+    }
     offset = None
     while True:
         try:
@@ -485,21 +540,25 @@ def telegram_bot_loop(token):
                 continue
             updates = resp.json().get("result", [])
             for update in updates:
-                offset = update["update_id"] + 1
+                offset = int(update["update_id"]) + 1
                 msg = update.get("message", {})
-                text = msg.get("text", "")
+                text = (msg.get("text", "") or "").strip().split("@")[0]  # strip @botname
                 chat_id = msg.get("chat", {}).get("id")
                 if not chat_id:
                     continue
-                if text.strip() == "/wind":
-                    reply = format_wind_status()
-                    _send_telegram(token, str(chat_id), reply)
+                handler = commands.get(text)
+                if handler:
+                    reply = handler()
+                    channel_id = _NOTIFY_PARAMS.get("chat_id", str(chat_id))
+                    _send_telegram(token, channel_id, reply)
         except Exception as e:
             log.error("Telegram bot error: %s", e)
             time.sleep(5)
 
 
 def main():
+    global _flights_seen, _last_flight_msg
+
     if AIRPORT_CODE:
         _lookup_airport(AIRPORT_CODE)
 
@@ -509,7 +568,7 @@ def main():
     log.info("Starting flight tracker (center=%.4f,%.4f radius=%gkm delay=%ds)",
              LATITUDE, LONGITUDE, RADIUS_KM, QUERY_DELAY)
 
-    # Start Telegram bot listener for /wind command
+    # Start Telegram bot listener for commands
     if _NOTIFY_SERVICE == "telegram":
         bot_thread = threading.Thread(
             target=telegram_bot_loop,
@@ -517,7 +576,7 @@ def main():
             daemon=True,
         )
         bot_thread.start()
-        log.info("Telegram bot started (listening for /wind)")
+        log.info("Telegram bot started (listening for commands)")
 
     # Build startup message with runway info
     startup_lines = [
@@ -563,6 +622,8 @@ def main():
                     msg = format_message(flight)
                     log.info("\n%s", msg)
                     send_notification(msg)
+                    _last_flight_msg = msg
+                    _flights_seen += 1
                 else:
                     log.warning("Could not parse flight details")
             else:
