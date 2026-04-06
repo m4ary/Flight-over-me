@@ -335,6 +335,8 @@ def format_runway_change(old_heading, new_heading, metar):
     duration = estimate_runway_duration(new_heading)
     if duration:
         duration_str = f"~{duration}h" if duration > 1 else "~1h"
+        until_time = time.strftime("%d/%m %I:%M %p", time.localtime(time.time() + duration * 3600))
+        duration_str += f" (until {until_time})"
     else:
         duration_str = "24h+"
 
@@ -343,7 +345,7 @@ def format_runway_change(old_heading, new_heading, metar):
         "",
         f"🌬 Wind: {wind_dir} {wind_kt}kt" + (f" (gusts {gust_kt}kt)" if gust_kt else ""),
         f"🧭 Landing from: {approach_from}",
-        f"⏱ Estimated duration: {duration_str}",
+        f"⏱ Estimated: {duration_str}",
     ]
     return "\n".join(lines)
 
@@ -402,6 +404,8 @@ def format_wind_status():
     duration = estimate_runway_duration(runway_heading)
     if duration:
         duration_str = f"~{duration}h" if duration > 1 else "~1h"
+        until_time = time.strftime("%d/%m %I:%M %p", time.localtime(time.time() + duration * 3600))
+        duration_str += f" (until {until_time})"
     else:
         duration_str = "24h+"
 
@@ -410,7 +414,7 @@ def format_wind_status():
         "",
         f"🌬 Wind: {wind_dir} {wind_kt}kt" + (f" (gusts {gust_kt}kt)" if gust_kt else ""),
         f"🧭 Landing from: {approach_from}",
-        f"⏱ Estimated duration: {duration_str}",
+        f"⏱ Estimated: {duration_str}",
         "",
         f"📡 METAR: {metar['raw']}",
     ]
@@ -425,8 +429,8 @@ def _parse_shoutrrr_url(url):
     return "shoutrrr", {}
 
 
-def _send_telegram(token, chat_id, message):
-    """Send via Telegram Bot API directly (handles unicode properly)."""
+def _send_telegram(token, chat_id, message, pin=False):
+    """Send via Telegram Bot API directly (handles unicode properly). Returns message_id."""
     resp = SESSION.post(
         f"https://api.telegram.org/bot{token}/sendMessage",
         json={"chat_id": chat_id, "text": message, "disable_notification": True},
@@ -434,8 +438,16 @@ def _send_telegram(token, chat_id, message):
     )
     if resp.status_code != 200:
         log.error("Telegram API error: %s %s", resp.status_code, resp.text)
-    else:
-        log.info("Notification sent via Telegram")
+        return None
+    log.info("Notification sent via Telegram")
+    msg_id = resp.json().get("result", {}).get("message_id")
+    if pin and msg_id:
+        SESSION.post(
+            f"https://api.telegram.org/bot{token}/pinChatMessage",
+            json={"chat_id": chat_id, "message_id": msg_id, "disable_notification": True},
+            timeout=10,
+        )
+    return msg_id
 
 
 def _send_shoutrrr(url, message):
@@ -581,7 +593,7 @@ def format_track(flight_number):
                 lines.append("✅ Departed on time")
 
         if estimated_arr:
-            eta = time.strftime("%H:%M", time.localtime(estimated_arr))
+            eta = time.strftime("%d/%m %I:%M %p", time.localtime(estimated_arr))
             lines.append(f"🕐 ETA: {eta}")
 
         lines.append(f"🔗 flightradar24.com/{flight_number}")
@@ -592,14 +604,14 @@ def format_track(flight_number):
         return f"Error getting details for {flight_number}."
 
 
-def send_notification(message):
+def send_notification(message, pin=False):
     """Send a notification. Uses Telegram API directly if URL is telegram://, otherwise shoutrrr."""
     if not SHOUTRRR_URL:
         log.warning("SHOUTRRR_URL not set, skipping notification")
         return
 
     if _NOTIFY_SERVICE == "telegram":
-        _send_telegram(_NOTIFY_PARAMS["token"], _NOTIFY_PARAMS["chat_id"], message)
+        _send_telegram(_NOTIFY_PARAMS["token"], _NOTIFY_PARAMS["chat_id"], message, pin=pin)
     else:
         _send_shoutrrr(SHOUTRRR_URL, message)
 
@@ -725,7 +737,7 @@ def main():
                 if new_runway and active_runway and new_runway != active_runway:
                     msg = format_runway_change(active_runway, new_runway, metar)
                     log.info("Runway change detected:\n%s", msg)
-                    send_notification(msg)
+                    send_notification(msg, pin=True)
                     active_runway = new_runway
                 elif new_runway:
                     active_runway = new_runway
